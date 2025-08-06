@@ -8,7 +8,7 @@ import { usePolygonDataUpdater } from '@/hooks/usePolygonDataUpdater';
 import { useDashboardStore } from '@/store/useDashboardStore';
 
 export default function Page() {
-  usePolygonDataUpdater();
+
   const MapComponent = useMemo(() => dynamic(() => import('@/components/dashboard/MapComponent'), { ssr:false }), []);
   return (
     <main className="flex h-screen w-screen bg-gray-100 text-gray-800">
