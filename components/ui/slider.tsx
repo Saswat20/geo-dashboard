@@ -1,0 +1,1 @@
+export const Slider=(p:any)=>(<input {...p} />);

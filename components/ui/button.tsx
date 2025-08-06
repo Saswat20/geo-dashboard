@@ -1,0 +1,1 @@
+export const Button=(p:any)=><button {...p} className={`px-3 py-1 border rounded ${p.className||''}`}>{p.children}</button>;

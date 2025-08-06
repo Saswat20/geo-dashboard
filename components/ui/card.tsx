@@ -1,0 +1,1 @@
+export const Card=(p:any)=><div className={`p-2 border rounded ${p.className||''}`}>{p.children}</div>;

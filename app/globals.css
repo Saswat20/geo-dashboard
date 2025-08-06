@@ -1,0 +1,6 @@
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+html, body, #__next { height: 100%; }
+.leaflet-interactive { transition: fill 300ms ease, stroke 300ms ease; }

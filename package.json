@@ -1,0 +1,32 @@
+
+{
+  "name": "geo-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "date-fns": "^2.30.0",
+    "leaflet": "^1.9.4",
+    "leaflet-draw": "^1.0.4",
+    "next": "15.4.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-leaflet": "^4.2.1",
+    "react-leaflet-draw": "^0.20.6",
+    "zustand": "^5.0.7",
+    "lucide-react": "^0.536.0"
+  },
+  "devDependencies": {
+    "@types/leaflet": "^1.9.20",
+    "@types/leaflet-draw": "^1.0.12",
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
