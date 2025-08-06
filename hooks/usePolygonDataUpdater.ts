@@ -1,34 +1,112 @@
+// hooks/usePolygonDataUpdater.ts
+'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useDashboardStore } from '@/store/useDashboardStore';
 import { fetchTemperatureData } from '@/services/openMeteoApi';
 import { differenceInHours, startOfDay } from 'date-fns';
-import { ColorRule } from '@/types';
+import type { ColorRule } from '@/types';
 
-const avg = (arr:number[])=>{ const v=arr.filter(x=>typeof x==='number'); if(v.length===0) return null; return v.reduce((a,b)=>a+b,0)/v.length; };
-const check=(value:number,op:string,val:number)=>{ switch(op){ case '<': return value<val; case '<=': return value<=val; case '>': return value>val; case '>=': return value>=val; case '=': return value===val; default: return false; } };
-const getColor=(value:number|null,rules:ColorRule[])=>{ if(value===null) return '#808080'; for(const r of rules) if(check(value,r.operator,r.value)) return r.color; return '#3388ff'; };
+/**
+ * Guard: average calculator
+ */
+const calculateAverage = (arr: (number | null | undefined)[] | null): number | null => {
+  if (!arr || arr.length === 0) return null;
+  const vals = arr.filter((v): v is number => typeof v === 'number' && !Number.isNaN(v));
+  if (vals.length === 0) return null;
+  return vals.reduce((a, b) => a + b, 0) / vals.length;
+};
 
-export const usePolygonDataUpdater = ()=>{
-  const { polygons, timeRange, updatePolygonData } = useDashboardStore(s=>({ polygons:s.polygons, timeRange:s.timeRange, updatePolygonData:s.updatePolygonData }));
-  useEffect(()=>{
-    let mounted=true;
-    const run=async()=>{
-      for(const p of Object.values(polygons)){
-        const data = await fetchTemperatureData(p.centroid.lat,p.centroid.lng,timeRange.start,timeRange.end);
-        if(!mounted) return;
-        if(!data || data.length===0){ updatePolygonData(p.id,null,'#808080'); continue; }
+const checkCondition = (value: number, operator: string, ruleValue: number): boolean => {
+  switch (operator) {
+    case '<': return value < ruleValue;
+    case '<=': return value <= ruleValue;
+    case '>': return value > ruleValue;
+    case '>=': return value >= ruleValue;
+    case '=': return value === ruleValue;
+    default: return false;
+  }
+};
+
+const getColorForValue = (value: number | null, rules: ColorRule[]): string => {
+  if (value === null) return '#808080';
+  // iterate rules in provided order (assuming user order)
+  for (const r of rules) {
+    if (checkCondition(value, r.operator, r.value)) return r.color;
+  }
+  return '#3388ff';
+};
+
+export const usePolygonDataUpdater = () => {
+  // SELECTORS: use separate selectors for stability (no new objects created)
+  const polygons = useDashboardStore((s) => s.polygons);
+  const timeRange = useDashboardStore((s) => s.timeRange);
+  const updatePolygonData = useDashboardStore((s) => s.updatePolygonData);
+
+  // keep a ref to avoid racing and to detect if component is unmounted
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!polygons || Object.keys(polygons).length === 0) return;
+
+    let cancelled = false;
+
+    const run = async () => {
+      // iterate polygons snapshot
+      const polyList = Object.values(polygons);
+      for (const p of polyList) {
+        // defensive: skip if no centroid
+        if (!p?.centroid) {
+          updatePolygonData(p.id, null, '#808080');
+          continue;
+        }
+
+        // fetch hourly data (cached in service)
+        const hourly = await fetchTemperatureData(p.centroid.lat, p.centroid.lng, timeRange.start, timeRange.end);
+        if (cancelled || !mountedRef.current) return;
+
+        if (!hourly || hourly.length === 0) {
+          // only update if value actually different (to avoid loop)
+          const prev = p.currentValue;
+          if (prev !== null) updatePolygonData(p.id, null, '#808080');
+          continue;
+        }
+
+        // compute slice offsets safely
         const dayStart = startOfDay(timeRange.start);
-        const startOffset = differenceInHours(timeRange.start, dayStart);
-        const endOffset = differenceInHours(timeRange.end, dayStart);
-        const s = Math.max(0,startOffset), e = Math.max(s,endOffset);
-        const slice = data.slice(s, e+1);
-        const average = avg(slice);
-        const color = getColor(average, p.rules);
-        updatePolygonData(p.id, average, color);
+        const startOffset = Math.max(0, differenceInHours(timeRange.start, dayStart));
+        const endOffset = Math.max(startOffset, differenceInHours(timeRange.end, dayStart));
+
+        const slice = hourly.slice(startOffset, endOffset + 1);
+        const avg = calculateAverage(slice);
+
+        // compute color using this polygon's rules
+        const color = getColorForValue(avg, p.rules ?? []);
+
+        // only write if changed (value OR color)
+        const valueChanged = (p.currentValue !== avg);
+        const colorChanged = (p.displayColor !== color);
+
+        if (valueChanged || colorChanged) {
+          // update store once per polygon
+          updatePolygonData(p.id, avg, color);
+        }
       }
     };
-    if(Object.keys(polygons).length>0) run();
-    return ()=>{ mounted=false; };
-  }, [polygons, timeRange, updatePolygonData]);
+
+    run().catch((err) => {
+      // fail silently but log
+      // eslint-disable-next-line no-console
+      console.error('Polygon updater error', err);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeRange.start?.toString(), timeRange.end?.toString(), JSON.stringify(Object.keys(polygons))]);
 };
