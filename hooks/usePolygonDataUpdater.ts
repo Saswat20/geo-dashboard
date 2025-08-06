@@ -34,9 +34,15 @@ const getColorForValue = (value: number | null, rules: ColorRule[] = []): string
   return '#3388ff';
 };
 
+/**
+ * usePolygonDataUpdater
+ * - Imperative getState + subscribe pattern to avoid React getServerSnapshot issues.
+ * - Debounced scheduling so rapid store changes don't re-run fetches repeatedly.
+ * - Guards against concurrent runs and avoids writing identical values (store also guards).
+ */
 export const usePolygonDataUpdater = () => {
   const mountedRef = useRef(true);
-  const pendingTimerRef = useRef<number | null>(null);
+  const timerRef = useRef<number | null>(null);
   const runningRef = useRef(false);
 
   useEffect(() => {
@@ -46,28 +52,20 @@ export const usePolygonDataUpdater = () => {
 
   useEffect(() => {
     const getState = useDashboardStore.getState;
-    const updatePolygonDataAction = () => getState().updatePolygonData;
-
     let cancelled = false;
 
     const performUpdate = async () => {
-      if (runningRef.current) return;
+      if (runningRef.current || cancelled || !mountedRef.current) return;
       runningRef.current = true;
-
       try {
-        const state = getState();
-        const { polygons, timeRange } = state;
-        const list = Object.values(polygons);
+        const { polygons, timeRange } = getState();
+        const polyList = Object.values(polygons);
 
-        for (const p of list) {
+        for (const p of polyList) {
           if (cancelled || !mountedRef.current) break;
-
           if (!p?.centroid) {
-            // double-check current store before writing
-            const cur = getState().polygons[p.id];
-            if (cur && (cur.currentValue !== null || cur.displayColor !== '#808080')) {
-              updatePolygonDataAction()(p.id, null, '#808080');
-            }
+            // If store has something non-default, clear it (store's update checks equality)
+            useDashboardStore.getState().updatePolygonData(p.id, null, '#808080');
             continue;
           }
 
@@ -75,10 +73,7 @@ export const usePolygonDataUpdater = () => {
           if (cancelled || !mountedRef.current) break;
 
           if (!hourly || hourly.length === 0) {
-            const cur = getState().polygons[p.id];
-            if (cur && (cur.currentValue !== null || cur.displayColor !== '#808080')) {
-              updatePolygonDataAction()(p.id, null, '#808080');
-            }
+            useDashboardStore.getState().updatePolygonData(p.id, null, '#808080');
             continue;
           }
 
@@ -89,14 +84,8 @@ export const usePolygonDataUpdater = () => {
           const avg = calculateAverage(slice);
           const color = getColorForValue(avg, p.rules ?? []);
 
-          // double-check against latest store values to avoid writing identical values
-          const cur = getState().polygons[p.id];
-          const valueChanged = cur?.currentValue !== avg;
-          const colorChanged = cur?.displayColor !== color;
-
-          if (valueChanged || colorChanged) {
-            updatePolygonDataAction()(p.id, avg, color);
-          }
+          // update store (the store now avoids identical writes)
+          useDashboardStore.getState().updatePolygonData(p.id, avg, color);
         }
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -106,59 +95,50 @@ export const usePolygonDataUpdater = () => {
       }
     };
 
-    // debounced scheduler to coalesce rapid updates
-    const scheduleUpdate = (delay = 500) => {
-      if (pendingTimerRef.current) {
-        clearTimeout(pendingTimerRef.current);
-        pendingTimerRef.current = null;
+    const schedule = (delay = 300) => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
       }
-      // window.setTimeout returns number; store it
-      pendingTimerRef.current = window.setTimeout(() => {
+      timerRef.current = window.setTimeout(() => {
         if (!cancelled && mountedRef.current) performUpdate();
-        pendingTimerRef.current = null;
+        timerRef.current = null;
       }, delay) as unknown as number;
     };
 
-    // run initially
-    scheduleUpdate(0);
+    // initial run on mount (short delay to allow store hydration)
+    schedule(50);
 
-    // subscribe to timeRange (stringify date to avoid unstable object identity)
+    // subscribe: timeRange changes
     const unsubTime = useDashboardStore.subscribe(
-      (s) => `${s.timeRange.start?.toString() || ''}__${s.timeRange.end?.toString() || ''}`,
-      () => {
-        scheduleUpdate(300); // quick debounce when time changes
-      }
+      (s) => `${s.timeRange.start?.getTime() || 0}_${s.timeRange.end?.getTime() || 0}`,
+      () => { schedule(250); }
     );
 
-    // subscribe to polygons keys (add/delete)
+    // subscribe: polygon add/remove
     const unsubPolys = useDashboardStore.subscribe(
       (s) => Object.keys(s.polygons).join(','),
-      () => {
-        scheduleUpdate(300);
-      }
+      () => { schedule(250); }
     );
 
-    // subscribe to polygon rules changes (detect changes by concatenating JSON)
+    // subscribe: rules edits (stringify rules)
     const unsubRules = useDashboardStore.subscribe(
       (s) => {
-        const ids = Object.keys(s.polygons);
-        return ids.map((id) => JSON.stringify(s.polygons[id]?.rules ?? [])).join('|');
+        const keys = Object.keys(s.polygons);
+        return keys.map((k) => JSON.stringify(s.polygons[k]?.rules ?? [])).join('|');
       },
-      () => {
-        scheduleUpdate(500);
-      }
+      () => { schedule(400); }
     );
 
     return () => {
       cancelled = true;
-      if (pendingTimerRef.current) {
-        clearTimeout(pendingTimerRef.current);
-        pendingTimerRef.current = null;
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
       }
       unsubTime();
       unsubPolys();
       unsubRules();
     };
-    // empty deps — we rely on subscriptions and imperative getState
   }, []);
 };
