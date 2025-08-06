@@ -7,9 +7,7 @@ import { fetchTemperatureData } from '@/services/openMeteoApi';
 import { differenceInHours, startOfDay } from 'date-fns';
 import type { ColorRule } from '@/types';
 
-/**
- * Helper: safe average
- */
+/** safe average */
 const calculateAverage = (arr: (number | null | undefined)[] | null): number | null => {
   if (!arr || arr.length === 0) return null;
   const nums = arr.filter((v): v is number => typeof v === 'number' && !Number.isNaN(v));
@@ -28,7 +26,7 @@ const checkCondition = (value: number, operator: string, ruleValue: number): boo
   }
 };
 
-const getColorForValue = (value: number | null, rules: ColorRule[]): string => {
+const getColorForValue = (value: number | null, rules: ColorRule[] = []): string => {
   if (value === null) return '#808080';
   for (const r of rules) {
     if (checkCondition(value, r.operator, r.value)) return r.color;
@@ -36,11 +34,10 @@ const getColorForValue = (value: number | null, rules: ColorRule[]): string => {
   return '#3388ff';
 };
 
-/**
- * Main hook — uses imperative store access + subscriptions
- */
 export const usePolygonDataUpdater = () => {
   const mountedRef = useRef(true);
+  const pendingTimerRef = useRef<number | null>(null);
+  const runningRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -48,29 +45,29 @@ export const usePolygonDataUpdater = () => {
   }, []);
 
   useEffect(() => {
-    // short helpers for store API
     const getState = useDashboardStore.getState;
-    const setStateUpdater = (id: string, value: number | null, color: string) => {
-      // call the store action to update polygon data
-      const updateFn = useDashboardStore.getState().updatePolygonData;
-      updateFn(id, value, color);
-    };
+    const updatePolygonDataAction = () => getState().updatePolygonData;
 
-    let running = false;
     let cancelled = false;
 
-    const updateAllPolygons = async () => {
-      if (running) return; // prevent concurrent runs
-      running = true;
+    const performUpdate = async () => {
+      if (runningRef.current) return;
+      runningRef.current = true;
+
       try {
         const state = getState();
         const { polygons, timeRange } = state;
-        const polyList = Object.values(polygons);
+        const list = Object.values(polygons);
 
-        for (const p of polyList) {
+        for (const p of list) {
           if (cancelled || !mountedRef.current) break;
-          if (!p || !p.centroid) {
-            setStateUpdater(p.id, null, '#808080');
+
+          if (!p?.centroid) {
+            // double-check current store before writing
+            const cur = getState().polygons[p.id];
+            if (cur && (cur.currentValue !== null || cur.displayColor !== '#808080')) {
+              updatePolygonDataAction()(p.id, null, '#808080');
+            }
             continue;
           }
 
@@ -78,9 +75,9 @@ export const usePolygonDataUpdater = () => {
           if (cancelled || !mountedRef.current) break;
 
           if (!hourly || hourly.length === 0) {
-            // only update if previously had a value to avoid unnecessary store writes
-            if (p.currentValue !== null || p.displayColor !== '#808080') {
-              setStateUpdater(p.id, null, '#808080');
+            const cur = getState().polygons[p.id];
+            if (cur && (cur.currentValue !== null || cur.displayColor !== '#808080')) {
+              updatePolygonDataAction()(p.id, null, '#808080');
             }
             continue;
           }
@@ -92,57 +89,76 @@ export const usePolygonDataUpdater = () => {
           const avg = calculateAverage(slice);
           const color = getColorForValue(avg, p.rules ?? []);
 
-          const valueChanged = p.currentValue !== avg;
-          const colorChanged = p.displayColor !== color;
+          // double-check against latest store values to avoid writing identical values
+          const cur = getState().polygons[p.id];
+          const valueChanged = cur?.currentValue !== avg;
+          const colorChanged = cur?.displayColor !== color;
+
           if (valueChanged || colorChanged) {
-            setStateUpdater(p.id, avg, color);
+            updatePolygonDataAction()(p.id, avg, color);
           }
         }
-      } catch (e) {
+      } catch (err) {
         // eslint-disable-next-line no-console
-        console.error('Polygon updater error', e);
+        console.error('Polygon updater error', err);
       } finally {
-        running = false;
+        runningRef.current = false;
       }
     };
 
-    // Run once initially
-    updateAllPolygons();
+    // debounced scheduler to coalesce rapid updates
+    const scheduleUpdate = (delay = 500) => {
+      if (pendingTimerRef.current) {
+        clearTimeout(pendingTimerRef.current);
+        pendingTimerRef.current = null;
+      }
+      // window.setTimeout returns number; store it
+      pendingTimerRef.current = window.setTimeout(() => {
+        if (!cancelled && mountedRef.current) performUpdate();
+        pendingTimerRef.current = null;
+      }, delay) as unknown as number;
+    };
 
-    // Subscribe to two things: timeRange changes and polygons added/removed
+    // run initially
+    scheduleUpdate(0);
+
+    // subscribe to timeRange (stringify date to avoid unstable object identity)
     const unsubTime = useDashboardStore.subscribe(
-      (s) => s.timeRange,
+      (s) => `${s.timeRange.start?.toString() || ''}__${s.timeRange.end?.toString() || ''}`,
       () => {
-        // schedule update (microtask)
-        setTimeout(() => { if (!cancelled) updateAllPolygons(); }, 0);
+        scheduleUpdate(300); // quick debounce when time changes
       }
     );
 
+    // subscribe to polygons keys (add/delete)
     const unsubPolys = useDashboardStore.subscribe(
       (s) => Object.keys(s.polygons).join(','),
       () => {
-        // polygons list changed (add/delete); refresh
-        setTimeout(() => { if (!cancelled) updateAllPolygons(); }, 0);
+        scheduleUpdate(300);
       }
     );
 
-    // also subscribe to rule changes (if user edits rules of a polygon)
+    // subscribe to polygon rules changes (detect changes by concatenating JSON)
     const unsubRules = useDashboardStore.subscribe(
       (s) => {
-        // concatenated JSON of rules hashes to detect rule edits
         const ids = Object.keys(s.polygons);
         return ids.map((id) => JSON.stringify(s.polygons[id]?.rules ?? [])).join('|');
       },
       () => {
-        setTimeout(() => { if (!cancelled) updateAllPolygons(); }, 0);
+        scheduleUpdate(500);
       }
     );
 
     return () => {
       cancelled = true;
+      if (pendingTimerRef.current) {
+        clearTimeout(pendingTimerRef.current);
+        pendingTimerRef.current = null;
+      }
       unsubTime();
       unsubPolys();
       unsubRules();
     };
+    // empty deps — we rely on subscriptions and imperative getState
   }, []);
 };
